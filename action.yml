@@ -1,0 +1,112 @@
+name: "DriftGuard Schema Check"
+description: "Fail your CI when a database schema change would break downstream data consumers."
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  config:
+    description: "Path to the .driftguard.toml config file."
+    required: false
+    default: ".driftguard.toml"
+  environment:
+    description: "Named environment from your config (e.g. staging, prod)."
+    required: false
+    default: ""
+  fail-on:
+    description: "Severity threshold that fails the check: safe | warning | breaking."
+    required: false
+    default: "breaking"
+  version:
+    description: "Version of the driftguard package to install."
+    required: false
+    default: "latest"
+  comment-on-pr:
+    description: "Post the drift report as a pull-request comment."
+    required: false
+    default: "true"
+  upload-sarif:
+    description: "Write a SARIF report for GitHub Code Scanning (upload it with codeql-action/upload-sarif)."
+    required: false
+    default: "false"
+  python-version:
+    description: "Python version used to run DriftGuard."
+    required: false
+    default: "3.12"
+
+outputs:
+  max-severity:
+    description: "Highest severity found: safe | warning | breaking."
+    value: ${{ steps.check.outputs.max_severity }}
+  breaking-count:
+    description: "Number of breaking changes detected."
+    value: ${{ steps.check.outputs.breaking_count }}
+  sarif-file:
+    description: "Path to the generated SARIF report, when enabled."
+    value: ${{ steps.check.outputs.sarif_file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install DriftGuard
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          pip install --quiet driftguard
+        else
+          pip install --quiet "driftguard==${{ inputs.version }}"
+        fi
+
+    - name: Run schema drift check
+      id: check
+      shell: bash
+      run: |
+        ENV_FLAG=""
+        if [ -n "${{ inputs.environment }}" ]; then
+          ENV_FLAG="--env ${{ inputs.environment }}"
+        fi
+
+        # Always produce the machine-readable report first so we can emit
+        # outputs even when the gate fails.
+        set +e
+        driftguard check --config "${{ inputs.config }}" $ENV_FLAG \
+          --fail-on "${{ inputs.fail-on }}" --format json -o driftguard-report.json
+        EXIT_CODE=$?
+        set -e
+
+        MAX_SEV=$(python -c "import json;d=json.load(open('driftguard-report.json'));s=d['summary'];print('breaking' if s['breaking'] else 'warning' if s['warning'] else 'safe')")
+        BREAKING=$(python -c "import json;print(json.load(open('driftguard-report.json'))['summary']['breaking'])")
+        echo "max_severity=$MAX_SEV" >> "$GITHUB_OUTPUT"
+        echo "breaking_count=$BREAKING" >> "$GITHUB_OUTPUT"
+
+        # Markdown for the PR comment and the job summary.
+        driftguard check --config "${{ inputs.config }}" $ENV_FLAG \
+          --fail-on "${{ inputs.fail-on }}" --format markdown -o driftguard-report.md || true
+        cat driftguard-report.md >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "${{ inputs.upload-sarif }}" = "true" ]; then
+          driftguard check --config "${{ inputs.config }}" $ENV_FLAG \
+            --fail-on "${{ inputs.fail-on }}" --format sarif -o driftguard.sarif || true
+          echo "sarif_file=driftguard.sarif" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit $EXIT_CODE
+
+    - name: Comment on pull request
+      # `always()` so the comment is still posted when the check step failed —
+      # that is precisely the case a reviewer most needs to see.
+      if: ${{ always() && inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if [ -f driftguard-report.md ]; then
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body-file driftguard-report.md --repo "${{ github.repository }}" || \
+            echo "::warning::Could not post PR comment (check the 'pull-requests: write' permission)."
+        fi

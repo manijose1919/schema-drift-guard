@@ -1,0 +1,2 @@
+# Normalize line endings so the repo is identical across Windows/Linux/macOS.
+* text=auto eol=lf
