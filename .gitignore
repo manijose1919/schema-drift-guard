@@ -12,6 +12,11 @@ dist/
 *.db
 .driftguard/
 
+# Secrets — never commit connection passwords
+.env
+.env.*
+!.env.example
+
 # Editors / OS
 .vscode/
 .idea/
