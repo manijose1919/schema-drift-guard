@@ -162,6 +162,8 @@ database_url = "postgresql://app:${PROD_DB_PASSWORD}@prod-db:5432/app"
 fail_on = "warning"
 ```
 
+Put those passwords in a gitignored `.env` (see `.env.example`); DriftGuard interpolates `${VAR}` from the process environment.
+
 ```bash
 driftguard snapshot --env prod    # each environment keeps its own baseline file
 driftguard check --env prod
